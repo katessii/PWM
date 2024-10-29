@@ -32,7 +32,7 @@ always @(posedge clk)
 	else
 		cnt<=cnt+27'd1;
 
-wire [3:0] pwm_inp = cnt[26] ? ~cnt[25:22]: cnt[25:22];
+(*mark_debug = "true"*) wire [3:0] pwm_inp = cnt[26] ? ~cnt[25:22]: cnt[25:22];
 
 //PWM comparator
 always @(posedge clk)
