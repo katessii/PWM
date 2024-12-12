@@ -1,149 +1,120 @@
 `timescale 1ns / 1ps
 
 module DHT11(
-    input logic clk,          // РўР°РєС‚РѕРІС‹Р№ СЃРёРіРЅР°Р» 100 РњР“С†
-    input logic rst_n,        // РЎРёРіРЅР°Р» СЃР±СЂРѕСЃР°
-    input logic uart_rx,      // Р’С…РѕРґРЅРѕР№ СЃРёРіРЅР°Р» UART РґР»СЏ Р·Р°РїСЂРѕСЃР° РґР°РЅРЅС‹С…
-    output logic uart_tx,     // Р’С‹С…РѕРґРЅРѕР№ СЃРёРіРЅР°Р» UART РґР»СЏ РїРµСЂРµРґР°С‡Рё РґР°РЅРЅС‹С…
-    inout logic dht11_data,   // Р”РІСѓС…СЃС‚РѕСЂРѕРЅРЅРёР№ РІС‹РІРѕРґ РґР»СЏ СЂР°Р±РѕС‚С‹ СЃ DHT11
-    output logic ready        // РЎРёРіРЅР°Р» РіРѕС‚РѕРІРЅРѕСЃС‚Рё РґР°РЅРЅС‹С…
+    input logic clk,          // Тактовый сигнал 100 МГц
+    input logic rst_n,        // Сигнал сброса
+    input logic uart_rx,      // Входной сигнал UART для запроса данных (1 или 0)
+    output logic [15:0] uart_tx,     // Выходной сигнал UART для передачи данных (сначала T, потом влажность)
+    //input logic dht11_data_i,
+    //output logic dht11_data_o,
+    //output logic dht11_data_an, // если 1, то вход; 0 - выход
+    inout logic dht11_data,
+    output logic ready        // Сигнал готовности данных
 );
 
-    // РџР°СЂР°РјРµС‚СЂС‹
-    parameter CLK_FREQ = 100000000; // Р§Р°СЃС‚РѕС‚Р° РєСЂРёСЃС‚Р°Р»Р»Р° (100 РњР“С†)
+    // Параметры
+    parameter CLK_FREQ = 100000000; // Частота кристалла (100 МГц)
     parameter DHT11_START_DELAY = 100000000; // 1 sec
-    parameter BAUD_RATE = 9600; // РЎРєРѕСЂРѕСЃС‚СЊ РїРµСЂРµРґР°С‡Рё UART Р±РёС‚/СЃРµРє
-    parameter DHT11_RESPONSE_TIME = 80000000; // Р’СЂРµРјСЏ РѕР¶РёРґР°РЅРёСЏ РѕС‚РІРµС‚Р° DHT11 ( РґР»СЏ 80 РјРєСЃ)
-    parameter DHT11_DATA_BITS = 40; // РљРѕР»РёС‡РµСЃС‚РІРѕ Р±РёС‚ РґР°РЅРЅС‹С…
-    parameter DHT11_DELAY = 18000; // Р—Р°РґРµСЂР¶РєР° РЅР° 18 РјСЃ РІ С‚Р°РєС‚Р°С…
-    parameter TIMEOUT = 10000; // РўР°Р№РјР°СѓС‚ РґР»СЏ РѕР¶РёРґР°РЅРёСЏ РґР°РЅРЅС‹С… (РІ С‚Р°РєС‚Р°С…)
+    parameter DHT11_DELAY = 1800000; // Задержка на 18 мс в тактах
+    parameter DHT11_RESPONSE_TIME = 80000000; // Время ожидания ответа DHT11 ( для 80 мкс)
+    parameter DHT11_DATA_BITS = 40; // Количество бит данных
+    //parameter TIMEOUT = 10000; // Таймаут для ожидания данных (в тактах)
 
-    // РљРѕРЅСЃС‚Р°РЅС‚С‹ РґР»СЏ РІСЂРµРјРµРЅРЅС‹С… РёРЅС‚РµСЂРІР°Р»РѕРІ (РєРѕРґРёСЂРѕРІРєР° 0 Рё 1)
-   parameter LOW_DURATION = 5000000; // 50 РјРёРєСЂРѕСЃРµРєСѓРЅРґ РїСЂРё 100 РњР“С†
-   parameter HIGH_DURATION_0 = 2800000; // 28 РјРёРєСЂРѕСЃРµРєСѓРЅРґ РїСЂРё 100 РњР“С†
-   parameter HIGH_DURATION_1 = 7000000; // 70 РјРёРєСЂРѕСЃРµРєСѓРЅРґ РїСЂРё 100 РњР“С†
+    // Константы для временных интервалов (кодировка 0 и 1)
+   parameter LOW_DURATION = 5000; // 50 микросекунд
+   parameter HIGH_DURATION_0 = 2800; // 28 микросекунд
+   parameter HIGH_DURATION_1 = 7000; // 70 микросекунд
 
 
-    // РЎРѕСЃС‚РѕСЏРЅРёСЏ РљРђ
+    // Состояния КА
     typedef enum logic [2:0] {
         IDLE,
         START,
         WAIT_RESPONSE,
         READ_DATA,
         SEND_DATA,
-        ERROR,
-        UART_SEND
-    } state_t; // РЅРѕРІС‹Р№ С‚РёРї РґР°РЅРЅС‹С…
+        ERROR
+    } state_t; // новый тип данных
 
     state_t state, next_state;
 
-    // РЎС‡РµС‚С‡РёРєРё РґР»СЏ Р·Р°РґРµСЂР¶РµРє
-    logic [26:0] counter; // 1 sec - 27 bit
-    logic [5:0] data_counter; // СЃС‡РµС‚С‡РёРє РґР°РЅРЅС‹С… (РѕС‚СЃР»РµР¶РёРІР°РµС‚ РєРѕР»РёС‡РµСЃС‚РІРѕ СЃС‡РёС‚Р°РЅРЅС‹С… Р±РёС‚ РґР°РЅРЅС‹С…)
-    logic [15:0] bit_counter; // РЎС‡РµС‚С‡РёРє РґР»СЏ РґР»РёС‚РµР»СЊРЅРѕСЃС‚Рё РёРјРїСѓР»СЊСЃРѕРІ
+    // Счетчики для задержек
+    logic [27:0] counter; // 1 sec - 27 bit
+    logic [5:0] data_counter; // счетчик данных (отслеживает количество считанных бит данных)
+    logic [15:0] bit_counter; // Счетчик для длительности импульсов
 
-    // РҐСЂР°РЅРµРЅРёРµ РґР°РЅРЅС‹С…
+    // Хранение данных
     logic [7:0] humidity_integer;
     logic [7:0] temperature_integer;
-    logic [DHT11_DATA_BITS-1:0] data_buffer; // РІРµРєС‚РѕСЂ 40 Р±РёС‚
-    logic [7:0] checksum; // РљРѕРЅС‚СЂРѕР»СЊРЅР°СЏ СЃСѓРјРјР° (РїРѕСЃР»РµРґРЅРёРµ 8 Р±РёС‚)
+    logic [DHT11_DATA_BITS-1:0] data_buffer; // вектор 40 бит
+    logic [7:0] checksum; // Контрольная сумма (последние 8 бит)
 
-    // РЎРёРіРЅР°Р»С‹ РґР»СЏ СѓРїСЂР°РІР»РµРЅРёСЏ DHT11
-    logic start_signal;
-    logic dht11_ready;
-    logic data_bit_ready; // РЎРёРіРЅР°Р», СѓРєР°Р·С‹РІР°СЋС‰РёР№, С‡С‚Рѕ Р±РёС‚ РґР°РЅРЅС‹С… РіРѕС‚РѕРІ
-    logic last_data_line; // РџРѕСЃР»РµРґРЅРµРµ СЃРѕСЃС‚РѕСЏРЅРёРµ Р»РёРЅРёРё РґР°РЅРЅС‹С…
+    // Сигнал для передачи через UART
+    logic [15:0] uart_data; // Данные для передачи через UART
+    logic uart_busy; // Сигнал, указывающий, что UART занят
+    logic [4:0] bit_index; // Индекс текущего бита для передачи
+    logic [15:0] uart_shift_reg; // Сдвиговый регистр для передачи данных
 
-    // РЎРёРіРЅР°Р» РґР»СЏ РїРµСЂРµРґР°С‡Рё С‡РµСЂРµР· UART
-    logic [15:0] uart_data; // Р”Р°РЅРЅС‹Рµ РґР»СЏ РїРµСЂРµРґР°С‡Рё С‡РµСЂРµР· UART
-    logic send_uart; // РЎРёРіРЅР°Р» РґР»СЏ РѕС‚РїСЂР°РІРєРё РґР°РЅРЅС‹С…
-    logic uart_busy; // РЎРёРіРЅР°Р», СѓРєР°Р·С‹РІР°СЋС‰РёР№, С‡С‚Рѕ UART Р·Р°РЅСЏС‚
-    logic [4:0] bit_index; // РРЅРґРµРєСЃ С‚РµРєСѓС‰РµРіРѕ Р±РёС‚Р° РґР»СЏ РїРµСЂРµРґР°С‡Рё
-    logic [15:0] uart_shift_reg; // РЎРґРІРёРіРѕРІС‹Р№ СЂРµРіРёСЃС‚СЂ РґР»СЏ РїРµСЂРµРґР°С‡Рё РґР°РЅРЅС‹С…
+    // Логика управления dht11_data
+    logic dht11_data_output; // Сигнал для управления направлением (0 это вход, 1 - выход)
+    logic dht11_data_internal; // Внутренний сигнал для управления данными
 
-    // Р›РѕРіРёРєР° СѓРїСЂР°РІР»РµРЅРёСЏ dht11_data
-    logic dht11_data_output; // РЎРёРіРЅР°Р» РґР»СЏ СѓРїСЂР°РІР»РµРЅРёСЏ РЅР°РїСЂР°РІР»РµРЅРёРµРј (0 СЌС‚Рѕ РІС…РѕРґ, 1 - РІС‹С…РѕРґ)
-    logic dht11_data_internal; // Р’РЅСѓС‚СЂРµРЅРЅРёР№ СЃРёРіРЅР°Р» РґР»СЏ СѓРїСЂР°РІР»РµРЅРёСЏ РґР°РЅРЅС‹РјРё
-
-    // РЈСЃС‚Р°РЅРѕРІРєР° dht11_data РЅР° РІС‹С…РѕРґ (tri-state Р»РѕРіРёРєР°)
-    assign dht11_data = dht11_data_output ? dht11_data_internal : 1'bz; 
-
-    // РЎРѕСЃС‚РѕСЏРЅРёРµ Рё РїРµСЂРµС…РѕРґС‹
-    always_ff @(posedge clk or negedge rst_n) begin // РґР»СЏ СЃРёРЅС…СЂРѕРЅРЅРѕРіРѕ РїСЂРѕС†РµСЃСЃР°
+    assign dht11_data = dht11_data_output ? dht11_data_internal : 'bz;
+    
+    // Состояние и переходы
+    always_ff @(posedge clk or negedge rst_n) begin // для синхронного процесса
         if (!rst_n) begin
-            state <= IDLE; // СЂРµР¶РёРј РѕР¶РёРґР°РЅРёСЏ
-            counter <= 0; // СЃР±СЂРѕСЃ СЃС‡РµС‚С‡РёРєР°
-            ready <= 0; // СЃРёРіРЅР°Р» РіРѕС‚РѕРІРЅРѕСЃС‚Рё
-            data_buffer <= 0; // СЃР±СЂРѕСЃ Р±СѓС„РµСЂР° РґР°РЅРЅС‹С…
+            state <= IDLE; // режим ожидания
+            counter <= 0; // сброс счетчика
+            ready <= 0; // сигнал готовности
+            data_buffer <= 0; // сброс буфера данных
             humidity_integer <= 0;
             temperature_integer <= 0;
             data_counter <= 0;
             bit_counter <= 0;
-            last_data_line <= 1; // РРЅРёС†РёР°Р»РёР·РёСЂСѓРµРј РІ РІС‹СЃРѕРєРѕРј СЃРѕСЃС‚РѕСЏРЅРёРё
-            send_uart <= 0; // РЎРёРіРЅР°Р» РѕС‚РїСЂР°РІРєРё РґР°РЅРЅС‹С…
-            uart_data <= 0; // Р”Р°РЅРЅС‹Рµ РґР»СЏ РѕС‚РїСЂР°РІРєРё РІ UART
-            uart_busy <= 0; // РР·РЅР°С‡Р°Р»СЊРЅРѕ UART РЅРµ Р·Р°РЅСЏС‚
-            bit_index <= 0; // РРЅРґРµРєСЃ Р±РёС‚РѕРІ РґР»СЏ РїРµСЂРµРґР°С‡Рё
-            dht11_data_output <= 0; // РР·РЅР°С‡Р°Р»СЊРЅРѕ dht11_data РЅР° РІС…РѕРґ
-            dht11_data_internal <= 0; // РР·РЅР°С‡Р°Р»СЊРЅРѕ Р·РЅР°С‡РµРЅРёРµ РґР°РЅРЅС‹С… DHT11
+            uart_data <= 0; // Данные для отправки в UART
+            uart_busy <= 0; // Изначально UART не занят
+            bit_index <= 0; // Индекс битов для передачи
+            dht11_data_output <= 0; // Изначально dht11_data на вход
+            dht11_data_internal <= 0; // Изначально значение данных DHT11
         end 
         else begin
         state <= next_state;
 
-            // РЈРїСЂР°РІР»РµРЅРёРµ СЃС‡РµС‚С‡РёРєРѕРј
-            if (state == START || state == WAIT_RESPONSE || state == READ_DATA || state == UART_SEND) begin
+            // Управление счетчиком
+            if (state == START || state == WAIT_RESPONSE || state == READ_DATA) begin
                 counter <= counter + 1;
             end 
             else begin
                 counter <= 0;
             end
 
-            // РћР±РЅРѕРІР»РµРЅРёРµ СЃРѕСЃС‚РѕСЏРЅРёСЏ Р»РёРЅРёРё РґР°РЅРЅС‹С…
+            // Обновление состояния линии данных
             if (state == READ_DATA) begin
+            bit_counter <= 0;
                 if (dht11_data == 0) begin
-                    if (last_data_line == 1) begin
-                        bit_counter <= 0;
-                    end
-                    bit_counter <= bit_counter + 1;
-                end else if (dht11_data == 1 && last_data_line == 0) begin
-                    if (bit_counter > LOW_DURATION) begin
-                        // РћРїСЂРµРґРµР»РµРЅРёРµ Р±РёС‚РѕРІ
-                        if (bit_counter < (LOW_DURATION + HIGH_DURATION_0)) begin
+                while (data_counter != 40) begin
+                bit_counter <= bit_counter + 1;
+                    if (bit_counter > LOW_DURATION) begin // 50 мкс
+                        // Определение битов
+                        if (bit_counter <= (LOW_DURATION + HIGH_DURATION_0) && dht11_data == 0) begin
+                        // кодировка 0 
                         data_buffer[data_counter] <= 0;
-                        end else if (bit_counter < (LOW_DURATION + HIGH_DURATION_1)) begin
+                        end else if (bit_counter <= (LOW_DURATION + HIGH_DURATION_1) && dht11_data == 1) begin
+                        // кодировка 1 
                             data_buffer[data_counter] <= 1;
                         end
                         data_counter <= data_counter + 1;
                     end
                     bit_counter <= 0;
-                end
-                last_data_line <= dht11_data;
-            end
-        end
-    
-
-            // Р›РѕРіРёРєР° РїРµСЂРµРґР°С‡Рё РґР°РЅРЅС‹С… С‡РµСЂРµР· UART
-            if (state == UART_SEND) begin
-                if (!uart_busy) begin
-                    uart_shift_reg <= {uart_data}; //  РґР°РЅРЅС‹Рµ 16 Р±РёС‚
-                    bit_index <= 0; // РќР°С‡РёРЅР°РµРј СЃ РїРµСЂРІРѕРіРѕ Р±РёС‚Р°
-                    uart_busy <= 1; // РЈСЃС‚Р°РЅР°РІР»РёРІР°РµРј СЃРёРіРЅР°Р» Р·Р°РЅСЏС‚РѕСЃС‚Рё
-                end 
-                else if (counter >= (CLK_FREQ / BAUD_RATE)) begin
-                    uart_tx <= uart_shift_reg[0]; // РџРµСЂРµРґР°РµРј С‚РµРєСѓС‰РёР№ Р±РёС‚
-                    uart_shift_reg <= {1'b0, uart_shift_reg[15:1]}; // РЎРґРІРёРіР°РµРј СЂРµРіРёСЃС‚СЂ РЅР° 1 Р±РёС‚
-                    bit_index <= bit_index + 1; // РџРµСЂРµС…РѕРґРёРј Рє СЃР»РµРґСѓСЋС‰РµРјСѓ Р±РёС‚Сѓ
-                    if (bit_index == 16) begin
-                        uart_busy <= 0; // Р—Р°РІРµСЂС€Р°РµРј РїРµСЂРµРґР°С‡Сѓ
-                        ready <= 1;
-                        send_uart <= 0; // РЎР±СЂР°СЃС‹РІР°РµРј СЃРёРіРЅР°Р» РѕС‚РїСЂР°РІРєРё
                     end
+                end
                 end
             end
         end
     
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    // Р›РѕРіРёРєР° РїРµСЂРµС…РѕРґРѕРІ СЃРѕСЃС‚РѕСЏРЅРёР№; РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ РІСЃРµРіРґР°, РєРѕРіРґР° РјРµРЅСЏСЋС‚СЃСЏ РІС…РѕРґРЅС‹Рµ СЃРёРіРЅР°Р»С‹
+    // Логика переходов состояний; выполняется всегда, когда меняются входные сигналы
     always_comb begin
         next_state = state;
         case (state)
@@ -154,74 +125,60 @@ module DHT11(
                 end
             end
             START: begin
-            // С€Р°Рі 2
-            if (counter >= DHT11_START_DELAY) begin  // 1 sec (100000000 РІ С‚Р°РєС‚Р°С…)
-            //counter <= 0;
-            dht11_data_output = 1;
-            dht11_data_internal = 0;
-            if (counter >= DHT11_DELAY+DHT11_START_DELAY) begin // DHT11_START_DELAY=18000 - Р—Р°РґРµСЂР¶РєР° РЅР° 18 РјСЃ РІ С‚Р°РєС‚Р°С…
-                    //counter <= 0;
-                    dht11_data_output = 0; // РџРµСЂРµРєР»СЋС‡Р°РµРј РІ СЂРµР¶РёРј С‡С‚РµРЅРёСЏ РґР°РЅРЅС‹С… РѕС‚ РґР°С‚С‡РёРєР°
+            // шаг 2
+            if (counter >= 18000) begin  // 1 sec (100000000 в тактах) //DHT11_START_DELAY
+            // DHT11_DELAY = 18000 = 18 мс
+            dht11_data_output = 1; // выход
+            dht11_data_internal = 0; // отправляем 0
+            if (counter >= DHT11_DELAY+DHT11_DELAY) begin // DHT11_START_DELAY=18000 - Задержка на 18 мс в тактах
+                    dht11_data_output = 0; // Переключаем в режим чтения данных от датчика
                     next_state = WAIT_RESPONSE;
                 end
             end  
             end
             WAIT_RESPONSE: begin
             if (dht11_data == 0) begin
-                // Р•СЃР»Рё Р»РёРЅРёСЏ РґР°РЅРЅС‹С… РЅРёР·РєР°СЏ, Р¶РґРµРј 80 РјРєСЃ
-                if (counter >= DHT11_RESPONSE_TIME+DHT11_DELAY+DHT11_START_DELAY) begin // // DHT11_RESPONSE_TIME=80000000 - Р’СЂРµРјСЏ РѕР¶РёРґР°РЅРёСЏ РѕС‚РІРµС‚Р° DHT11 ( РґР»СЏ 80 РјРєСЃ)
-                    //counter <= 0; // РЎР±СЂР°СЃС‹РІР°РµРј СЃС‡РµС‚С‡РёРє
-                    // РџРѕСЃР»Рµ РЅРёР·РєРѕРіРѕ СЃРёРіРЅР°Р»Р°, Р¶РґРµРј РІС‹СЃРѕРєРёР№
+                // Если линия данных низкая, ждем 80 мкс
+                if (counter >= DHT11_RESPONSE_TIME+DHT11_DELAY+DHT11_START_DELAY) begin // // DHT11_RESPONSE_TIME=80000000 - Время ожидания ответа DHT11 ( для 80 мкс)
+                    // После низкого сигнала, ждем высокий
+                     if (dht11_data == 1) begin
+                // Если линия данных высокая, значит DHT11 готов передать данные
+                        if (counter >= DHT11_RESPONSE_TIME+DHT11_RESPONSE_TIME+DHT11_DELAY+DHT11_START_DELAY) begin
+                    //counter <= 0; // Сбрасываем счетчик
+                    next_state = READ_DATA; // Переход к чтению данных
                 end
-            end else if (dht11_data == 1) begin
-                // Р•СЃР»Рё Р»РёРЅРёСЏ РґР°РЅРЅС‹С… РІС‹СЃРѕРєР°СЏ, Р·РЅР°С‡РёС‚ DHT11 РіРѕС‚РѕРІ РїРµСЂРµРґР°С‚СЊ РґР°РЅРЅС‹Рµ
-                if (counter >= DHT11_RESPONSE_TIME+DHT11_RESPONSE_TIME+DHT11_DELAY+DHT11_START_DELAY) begin
-                    //counter <= 0; // РЎР±СЂР°СЃС‹РІР°РµРј СЃС‡РµС‚С‡РёРє
-                    next_state = READ_DATA; // РџРµСЂРµС…РѕРґ Рє С‡С‚РµРЅРёСЋ РґР°РЅРЅС‹С…
                 end
-            end
+                end
+                end
         end
             READ_DATA: begin
                 if (data_counter >= DHT11_DATA_BITS) begin
                     next_state = SEND_DATA;
                 end
-                if (counter >= TIMEOUT) begin
-                    next_state = ERROR; // РўР°Р№РјР°СѓС‚
-                 end
+                /*if (counter >= TIMEOUT) begin
+                    next_state = ERROR; // Таймаут
+                 end*/
             end
             SEND_DATA: begin
-                if (uart_rx) begin
-                    // Р•СЃР»Рё РїСЂРёС€РµР» СЃРёРіРЅР°Р» 1 РѕС‚ UART, РѕС‚РїСЂР°РІР»СЏРµРј РґР°РЅРЅС‹Рµ
-                    if (uart_rx == 1) begin
-                        humidity_integer = data_buffer[7:0]; // Р’Р»Р°Р¶РЅРѕСЃС‚СЊ
-                        temperature_integer = data_buffer[23:16]; // РўРµРјРїРµСЂР°С‚СѓСЂР°
-                        checksum = data_buffer[39:32]; // РљРѕРЅС‚СЂРѕР»СЊРЅР°СЏ СЃСѓРјРјР°
+                        humidity_integer = data_buffer[7:0]; // Влажность
+                        temperature_integer = data_buffer[23:16]; // Температура
+                        checksum = data_buffer[39:32]; // Контрольная сумма
                         if (checksum == (humidity_integer + temperature_integer)) begin
-                            uart_data = {temperature_integer, humidity_integer}; // Р¤РѕСЂРјРёСЂСѓРµРј 16 Р±РёС‚ РґР»СЏ РїРµСЂРµРґР°С‡Рё
-                        end else begin
-                            uart_data = 16'h0000; // Р•СЃР»Рё РєРѕРЅС‚СЂРѕР»СЊРЅР°СЏ СЃСѓРјРјР° РЅРµРІРµСЂРЅР°, РѕС‚РїСЂР°РІР»СЏРµРј 0
+                            uart_tx = {temperature_integer, humidity_integer}; // Формируем 16 бит для передачи
+                            ready <= 1;
                         end
-                        send_uart = 1; // РЈСЃС‚Р°РЅР°РІР»РёРІР°РµРј СЃРёРіРЅР°Р» РѕС‚РїСЂР°РІРєРё РґР°РЅРЅС‹С…
-                        next_state = UART_SEND; // РџРµСЂРµС…РѕРґРёРј РІ СЃРѕСЃС‚РѕСЏРЅРёРµ РїРµСЂРµРґР°С‡Рё РґР°РЅРЅС‹С…
-                    end else begin
-                        uart_data = 16'h0000; // Р•СЃР»Рё СЃРёРіРЅР°Р» РЅРµ 1, РѕС‚РїСЂР°РІР»СЏРµРј 0
-                        send_uart = 1; // РЈСЃС‚Р°РЅР°РІР»РёРІР°РµРј СЃРёРіРЅР°Р» РѕС‚РїСЂР°РІРєРё РґР°РЅРЅС‹С…
-                        next_state = UART_SEND; // РџРµСЂРµС…РѕРґРёРј РІ СЃРѕСЃС‚РѕСЏРЅРёРµ РїРµСЂРµРґР°С‡Рё РґР°РЅРЅС‹С…
+                        else begin
+                            uart_tx = 16'h0000; // Если контрольная сумма неверна, отправляем 0
+                            ready <= 1;
+                        end
+                            next_state = IDLE; // Переходим в состояние ожидания
                     end
-                end
-            end
-            UART_SEND: begin
-                // Р›РѕРіРёРєР° РїРµСЂРµРґР°С‡Рё С‡РµСЂРµР· UART СѓР¶Рµ СЂРµР°Р»РёР·РѕРІР°РЅР° РІ РѕСЃРЅРѕРІРЅРѕРј РїСЂРѕС†РµСЃСЃРµ
-                if (!uart_busy) begin
-                    next_state = IDLE; // Р’РѕР·РІСЂР°С‰Р°РµРјСЃСЏ РІ СЃРѕСЃС‚РѕСЏРЅРёРµ РѕР¶РёРґР°РЅРёСЏ РїРѕСЃР»Рµ Р·Р°РІРµСЂС€РµРЅРёСЏ РїРµСЂРµРґР°С‡Рё
-                end
-            end
+                    
             ERROR: begin
-                uart_data = 16'h0000; // РћС‚РїСЂР°РІР»СЏРµРј 0 РІ СЃР»СѓС‡Р°Рµ РѕС€РёР±РєРё
-                send_uart = 1; // РЈСЃС‚Р°РЅР°РІР»РёРІР°РµРј СЃРёРіРЅР°Р» РѕС‚РїСЂР°РІРєРё РґР°РЅРЅС‹С…
-                next_state = UART_SEND; // РџРµСЂРµС…РѕРґРёРј РІ СЃРѕСЃС‚РѕСЏРЅРёРµ РїРµСЂРµРґР°С‡Рё РґР°РЅРЅС‹С…
+                uart_tx = 16'h0000; // Отправляем 0 в случае ошибки
+                ready <= 1;
+                next_state = IDLE; // Переходим в состояние передачи данных
             end
         endcase
     end
-
 endmodule
